@@ -186,7 +186,10 @@ Note: Cannot specify both --client-id and --custom-client-id simultaneously`,
 		}
 
 		// Set up a single resource handler
-		lurePath := pathPrefix + "/lure"
+		lurePath := pathPrefix
+		if lurePath == "" {
+			lurePath = "/lure"
+		}
 		http.HandleFunc(lurePath, getLureHandler(finalClientId, finalUserAgent))
 
 		host, port, err := net.SplitHostPort(address)
