@@ -229,17 +229,25 @@ Note: When using --domain, the domain must be properly configured to point to th
 		// Configure SSL/TLS if requested
 		isHTTPS := false
 		protocol := "http"
-		if domain != "" && (certFile != "" || keyFile != "") {
-			slog.Error("Cannot use both --domain and --cert/--key simultaneously")
-			os.Exit(1)
+		useAutoSSL := false
+
+		// Check if we're using both Let's Encrypt and custom certs (not allowed)
+		if domain != "" && (certFile != "" && keyFile != "") {
+			// Custom certificates take precedence
+			slog.Warn("Using custom certificates, ignoring Let's Encrypt for domain")
 		}
 
-		if domain != "" || (certFile != "" && keyFile != "") {
+		// Determine if we're using Let's Encrypt
+		if domain != "" && (certFile == "" || keyFile == "") {
+			useAutoSSL = true
+		}
+
+		if (certFile != "" && keyFile != "") || useAutoSSL {
 			isHTTPS = true
 			protocol = "https"
 
 			// If using Let's Encrypt, typically run on port 443
-			if domain != "" && address == ":8080" {
+			if useAutoSSL && address == ":8080" {
 				address = ":443"
 				server.Addr = address
 				// Re-parse the address
