@@ -369,6 +369,7 @@ Note: When using --domain, the domain must be properly configured to point to th
 					Prompt:     autocert.AcceptTOS,
 					HostPolicy: autocert.HostWhitelist(domain),
 					Cache:      autocert.DirCache("certs"),
+					ForceRSA:   true,
 					Email:      "", // Optional: add email for notifications
 				}
 				server.TLSConfig = certManager.TLSConfig()
